@@ -200,6 +200,10 @@ static uint8_t g_sei_trailer[NI_CC_SEI_TRAILER_LEN] = {
 #endif
 #endif
 
+#ifdef PRINT_FW_LOGS
+ni_retcode_t ni_device_get_and_print_firmware_logs(ni_session_context_t *p_ctx);
+#endif
+
 void SwapSWBytes(uint8_t *buf, uint32_t bytes)
 {
   uint32_t i;
@@ -760,6 +764,9 @@ static ni_retcode_t check_err_rc(
     if (retval != NI_RETCODE_SUCCESS)
     {
       ni_log2(ctx, NI_LOG_ERROR, "Query for statistics failed with %d!\n", retval);
+#ifdef PRINT_FW_LOGS
+      ni_device_get_and_print_firmware_logs(ctx);
+#endif
       return NI_RETCODE_FAILURE;
     }
 
@@ -773,6 +780,9 @@ static ni_retcode_t check_err_rc(
     else if(opt == OPT_2){
       if(!stat_full){
         ni_log2(ctx, NI_LOG_ERROR, "ERROR %s(): passed parameters are null!, return\n", __func__);
+#ifdef PRINT_FW_LOGS
+        ni_device_get_and_print_firmware_logs(ctx);
+#endif
         return NI_RETCODE_INVALID_PARAM;
       }
       retval = ni_nvme_check_error_code(stat_full->ui32LastTransactionCompletionStatus, opcode, type, hw_id, inst_id);
@@ -799,6 +809,9 @@ static ni_retcode_t check_err_rc(
               "sess_err_count %u inst_err_no %u\n",
               func, line, *(inst_id), ui16ErrorCount,
               ui32LastErrorStatus);
+#ifdef PRINT_FW_LOGS
+      ni_device_get_and_print_firmware_logs(ctx);
+#endif
 #ifdef XCODER_SELF_KILL_ERR
       if(opt != OPT_3)
       {
@@ -1315,6 +1328,7 @@ ni_retcode_t ni_decoder_session_open(ni_session_context_t* p_ctx)
     p_ctx->last_pkt_pos = 0;
     p_ctx->last_frame_offset = 0;
     p_ctx->last_frame_dropped = 0;
+    p_ctx->pending_bitstream_buffer_realloc = 0;
     memset(p_ctx->pkt_custom_sei_set, 0, NI_FIFO_SZ * sizeof(ni_custom_sei_set_t *));
 
     //malloc zero data buffer
@@ -1977,33 +1991,37 @@ int ni_decoder_session_write(ni_session_context_t* p_ctx, ni_packet_t* p_packet)
     {
       p_ctx->biggest_bitstream_buffer_allocated = buf_info.buf_avail_size;
     }
-    if (p_ctx->biggest_bitstream_buffer_allocated < packet_size &&
-        buf_info.buf_avail_size == p_ctx->biggest_bitstream_buffer_allocated)
+    if (p_ctx->biggest_bitstream_buffer_allocated < packet_size)
     {
-      // Reallocate decoder bitstream buffers to accomodate
-      if (ni_cmp_fw_api_ver((char*) &p_ctx->fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX],
-                            "66") >= 0)
+      p_ctx->pending_bitstream_buffer_realloc = 1;
+      if (buf_info.buf_avail_size == p_ctx->biggest_bitstream_buffer_allocated)
       {
-          retval = ni_config_instance_set_write_len(p_ctx,
-                                                    NI_DEVICE_TYPE_DECODER,
-                                                    // packet buffer aligned to NI_MAX_PACKET_SZ(128k)
-                                                    (packet_size / NI_MAX_PACKET_SZ + 1) * NI_MAX_PACKET_SZ);
-          CHECK_ERR_RC(p_ctx, retval, 0, nvme_config_xcoder_config_set_write_legth,
-                  p_ctx->device_type, p_ctx->hw_id,
-                  &(p_ctx->session_id), OPT_3);
-          CHECK_VPU_RECOVERY(retval);
+        // Reallocate decoder bitstream buffers to accomodate
+        if (ni_cmp_fw_api_ver((char*) &p_ctx->fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX],
+                              "66") >= 0)
+        {
+            retval = ni_config_instance_set_write_len(p_ctx,
+                                                      NI_DEVICE_TYPE_DECODER,
+                                                      // packet buffer aligned to NI_MAX_PACKET_SZ(128k)
+                                                      (packet_size / NI_MAX_PACKET_SZ + 1) * NI_MAX_PACKET_SZ);
+            CHECK_ERR_RC(p_ctx, retval, 0, nvme_config_xcoder_config_set_write_legth,
+                    p_ctx->device_type, p_ctx->hw_id,
+                    &(p_ctx->session_id), OPT_3);
+            CHECK_VPU_RECOVERY(retval);
+        }
+        else
+        {
+            retval = ni_config_instance_set_decoder_params(p_ctx, packet_size);
+        }
+        if (NI_RETCODE_SUCCESS != retval)
+        {
+            ni_log2(p_ctx, NI_LOG_ERROR,  "%s(): failed to reallocate bitstream\n", __FUNCTION__);
+            LRETURN;
+        }
+        p_ctx->pending_bitstream_buffer_realloc = 0;
+        query_retry--;
+        continue;
       }
-      else
-      {
-          retval = ni_config_instance_set_decoder_params(p_ctx, packet_size);
-      }
-      if (NI_RETCODE_SUCCESS != retval)
-      {
-          ni_log2(p_ctx, NI_LOG_ERROR,  "%s(): failed to reallocate bitstream\n", __FUNCTION__);
-          LRETURN;
-      }
-      query_retry--;
-      continue;
     }
 
     if (NI_RETCODE_SUCCESS != retval ||
@@ -4452,6 +4470,11 @@ int ni_encoder_session_write(ni_session_context_t* p_ctx, ni_frame_t* p_frame)
     p_meta->frame_roi_map_size = p_frame->roi_len;
     p_meta->frame_roi_avg_qp = p_ctx->roi_avg_qp;
     p_meta->enc_reconfig_data_size = p_frame->reconf_len;
+    p_meta->hor_adjust_offset = p_frame->hor_adjust_offset / ((p_ctx->src_bit_depth == 10) ? 2 : 1);
+    // Reset it for the next frame
+    p_frame->hor_adjust_offset = 0;
+    ni_log2(p_ctx, NI_LOG_DEBUG,
+           "### %s(): p_meta->hor_adjust_offset %d src_bit_depth %d\n", __func__, p_meta->hor_adjust_offset, p_ctx->src_bit_depth);
 
     if (ni_cmp_fw_api_ver((char*) &p_ctx->fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX],
                           "6Q") >= 0)
@@ -4902,6 +4925,22 @@ int ni_encoder_session_read(ni_session_context_t* p_ctx, ni_packet_t* p_packet)
       LRETURN;
     } else
     {
+        if (((ni_xcoder_params_t *)p_ctx->p_session_config)->minFramesDelay == 2)
+        {
+          if (p_ctx->pkt_num) // do not read until header is received
+          {
+              uint64_t pkt_num = (p_ctx->codec_format == NI_CODEC_FORMAT_AV1) ? p_ctx->av1_pkt_num : p_ctx->pkt_num - 1; // deduct header from pkt_num
+              if (p_ctx->frame_num - pkt_num < (p_ctx->current_frame_delay - 1) &&
+                  !p_ctx->ready_to_close)
+              {
+                  ni_log2(p_ctx, NI_LOG_TRACE,  "%s: constant delay mode 3, delay reading send frame %d receive pkt %d gop %d current_frame_delay %d\n",
+                          __FUNCTION__, p_ctx->frame_num, pkt_num,
+                          p_ctx->last_gop_size, p_ctx->current_frame_delay);
+                  retval = NI_RETCODE_SUCCESS;
+                  LRETURN;
+              }
+          }
+        }
         break;
     }
   }
@@ -4961,7 +5000,11 @@ int ni_encoder_session_read(ni_session_context_t* p_ctx, ni_packet_t* p_packet)
   {
       p_meta = (ni_metadata_enc_bstream_t *)p_packet->p_data;
       p_packet->pts = (int64_t)(p_meta->frame_tstamp);
-      p_packet->frame_type = p_meta->frame_type;
+
+      // Frame types that encoder can return are I=0, P=1, B=2, Not coded=3.
+      // Since all I-frames encoded by Quadra are IDR frames, interpret an I frame as IDR frame.
+      p_packet->frame_type = (p_meta->frame_type == 0) ?
+          PIC_TYPE_IDR : ((p_meta->frame_type == 3) ? PIC_NOT_CODED : p_meta->frame_type);
       p_packet->avg_frame_qp = p_meta->avg_frame_qp;
       p_packet->recycle_index = p_meta->recycle_index;
       p_packet->av1_show_frame = p_meta->av1_show_frame;
@@ -7713,7 +7756,6 @@ int ni_create_frame(ni_frame_t* p_frame, uint32_t read_length, uint64_t*
         p_frame->crop_left = p_meta->metadata_common.crop_left;
         p_frame->crop_right = p_meta->metadata_common.crop_right;
         p_frame->ni_pict_type = p_meta->metadata_common.frame_type;
-
         p_frame->video_width = p_meta->metadata_common.frame_width;
         p_frame->video_height = p_meta->metadata_common.frame_height;
 
@@ -8491,7 +8533,8 @@ void ni_set_custom_dec_template(ni_session_context_t *p_ctx,
   p_cfg->ui8MCMode = p_dec->mcmode;
   p_cfg->ui8UduSeiEnabled = p_ctx->enable_user_data_sei_passthru || p_dec->enable_user_data_sei_passthru;
   p_cfg->ui16MaxSeiDataSize = NI_MAX_SEI_DATA;
-  p_cfg->ui8DisablePictureReordering = p_dec->decoder_low_delay > 0;
+  p_cfg->ui8DisablePictureReordering = (p_dec->decoder_low_delay > 0) ? 1 :
+      (p_dec->decoder_disable_reorder ? 1 : 0);
   p_ctx->force_low_delay = p_dec->force_low_delay;
   p_cfg->ui8EnablelowDelayCheck = p_dec->enable_low_delay_check == 1;
   p_cfg->ui32SourceWidth = w;
@@ -8598,13 +8641,24 @@ void ni_set_custom_dec_template(ni_session_context_t *p_ctx,
       p_cfg->asOutputConfig[i].ui8ScaleResCeil = p_dec->scale_resolution_ceil[j] - 1;
     }
 
-    p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width =
-        (uint16_t)((p_dec->scale_wh[j][0]+1) & 0xFFFE);
-    p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height =
-        (uint16_t)((p_dec->scale_wh[j][1]+1) & 0xFFFE);
+    if (p_cfg->ui8MaxExtraHwFrameCnt != 255 &&
+        ni_cmp_fw_api_ver((char *)&p_ctx->fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX], "6sT") >= 0)
+    {
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width = (p_dec->scale_wh[j][0] < 0) ?
+            (int16_t)(p_dec->scale_wh[j][0] & -2) : (int16_t)((p_dec->scale_wh[j][0]+1) & 0xFFFE);
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height = (p_dec->scale_wh[j][1] < 0) ?
+            (int16_t)(p_dec->scale_wh[j][1] & -2) : (int16_t)((p_dec->scale_wh[j][1]+1) & 0xFFFE);
+    }
+    else
+    {
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width = (p_dec->scale_wh[j][0] < 0) ?
+            0 : (int16_t)((p_dec->scale_wh[j][0]+1) & 0xFFFE);
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height = (p_dec->scale_wh[j][1] < 0) ?
+            0 : (int16_t)((p_dec->scale_wh[j][1]+1) & 0xFFFE);
+    }
 
-    if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width ||
-      p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height)
+    if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width ||
+      p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height)
     {
       p_cfg->asOutputConfig[i].ui8ScaleEnabled = 1;
     }
@@ -8689,9 +8743,9 @@ void ni_set_custom_dec_template(ni_session_context_t *p_ctx,
       p_cfg->asOutputConfig[i].sCroppingRectable.ui16Y,
       p_cfg->asOutputConfig[i].sCroppingRectable.ui16W,
       p_cfg->asOutputConfig[i].sCroppingRectable.ui16H);
-    ni_log2(p_ctx, NI_LOG_DEBUG,  "[%d] sOutputPictureSize.ui16Width x height %d x %d\n", i,
-      p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width,
-      p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height);
+    ni_log2(p_ctx, NI_LOG_DEBUG,  "[%d] sOutputPictureSize.i16Width x height %d x %d\n", i,
+      p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width,
+      p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height);
     ni_log2(p_ctx, NI_LOG_DEBUG, "[%d] ui8ScaleEnabled %d\n", i, p_cfg->asOutputConfig[i].ui8ScaleEnabled);
     ni_log2(p_ctx, NI_LOG_DEBUG, "[%d] ui8EnablePpuScaleAdapt %u\n", i, p_cfg->asOutputConfig[i].ui8EnablePpuScaleAdapt);
     ni_log2(p_ctx, NI_LOG_DEBUG, "[%d] ui8EnablePpuScaleLimit %u\n", i, p_cfg->asOutputConfig[i].ui8EnablePpuScaleLimit);
@@ -8766,6 +8820,7 @@ void ni_set_custom_template(ni_session_context_t *p_ctx,
   p_cfg->ui8adaptiveLamdaMode = p_enc->adaptiveLamdaMode;
   p_cfg->ui8adaptiveCrfMode = p_enc->adaptiveCrfMode;
   p_cfg->ui8intraCompensateMode = p_enc->intraCompensateMode;
+  p_cfg->ui8customMinCoeffDiv = p_enc->customMinCoeffDiv;
 
   // enable_dynamic_8x8_merge, enable_dynamic_16x16_merge, enable_dynamic_32x32_merge,
   // trans_rate, enable_hvs_qp_scale:
@@ -8916,10 +8971,25 @@ void ni_set_custom_template(ni_session_context_t *p_ctx,
       if (p_src->fps_denominator != 0 &&
           (p_src->fps_number % p_src->fps_denominator) != 0)
       {
-          // Fractional FPS: use original fps_number/fps_denominator
+          // Fractional FPS
           uint32_t numUnitsInTick = 1000;
-          p_cfg->i32frameRateDenominator = numUnitsInTick + 1;
-          p_cfg->i32frameRateInfo = (p_src->fps_number * numUnitsInTick) / p_src->fps_denominator;
+          if (p_src->fps_denominator == numUnitsInTick + 1)
+          {
+                p_cfg->i32frameRateDenominator = numUnitsInTick + 1;
+                p_cfg->i32frameRateInfo = p_enc->frame_rate + 1;
+                p_cfg->i32frameRateInfo *= numUnitsInTick;
+          }
+          else
+          {
+                p_cfg->i32frameRateDenominator = numUnitsInTick + 1;
+                p_cfg->i32frameRateInfo = (int32_t)(((uint64_t)p_src->fps_number * (uint64_t)numUnitsInTick) / (uint64_t)p_src->fps_denominator);
+          }
+      }
+      else if (p_src->fps_denominator != 0 && p_src->fps_number < p_src->fps_denominator)
+      {
+          // Fractional FPS < 1, set to 1
+          p_cfg->i32frameRateInfo = 1;
+          p_cfg->i32frameRateDenominator = 1;
       }
       else
       {
@@ -10559,8 +10629,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
     //checking scaling param
     if (p_cfg->asOutputConfig[i].ui8ScaleEnabled)
     {
-      if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height == 0 ||
-        p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width == 0)
+      if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height == 0 ||
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width == 0)
       {
         if (p_cfg->asOutputConfig[i].ui8EnablePpuScaleAdapt)
         {
@@ -10570,8 +10640,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
           LRETURN;
         }
       }
-      if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height & 1 ||
-        p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width & 1 )
+      if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height & 1 ||
+        p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width & 1 )
       {
         ni_strncpy(p_param_err, max_err_len, "Invalid scale value: even values only", max_err_len - 1);
         param_ret = NI_RETCODE_PARAM_INVALID_VALUE;
@@ -10580,8 +10650,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
 
       if (p_cfg->asOutputConfig[i].ui8EnablePpuScaleLimit == 1)
       {
-        if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width > w ||
-          p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height > h)
+        if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width > w ||
+          p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height > h)
         {
             ni_strncpy(p_param_err, max_err_len, "Invalid scale value: downscale only", max_err_len - 1);
             param_ret = NI_RETCODE_PARAM_INVALID_VALUE;
@@ -10592,8 +10662,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
       if (p_cfg->asOutputConfig[i].ui8CropMode == NI_DEC_CROP_MODE_MANUAL)
       {
         //reject if scale dimensions exceed crop dimensions
-        if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height > p_cfg->asOutputConfig[i].sCroppingRectable.ui16H ||
-          p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width > p_cfg->asOutputConfig[i].sCroppingRectable.ui16W)
+        if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height > p_cfg->asOutputConfig[i].sCroppingRectable.ui16H ||
+          p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width > p_cfg->asOutputConfig[i].sCroppingRectable.ui16W)
         {
           ni_strncpy(p_param_err, max_err_len, "Invalid scale dimensions: downscale only after cropping", max_err_len - 1);
           param_ret = NI_RETCODE_PARAM_ERROR_OOR;
@@ -10640,8 +10710,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
       if (p_cfg->asOutputConfig[i].ui8ScaleEnabled)
       {
         //only no need to check crop compat if scale is set
-        if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height % 4 ||
-          p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Height < 128)
+        if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height % 4 ||
+          p_cfg->asOutputConfig[i].sOutputPictureSize.i16Height < 128)
         {
           ni_strncpy(p_param_err, max_err_len,
                   "Invalid scale height: mult of 4 only, >= 128",
@@ -10649,8 +10719,8 @@ ni_retcode_t ni_validate_custom_dec_template(ni_xcoder_params_t *p_src,
           param_ret = NI_RETCODE_PARAM_INVALID_VALUE;
           LRETURN;
         }
-        if (p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width % 4 ||
-          p_cfg->asOutputConfig[i].sOutputPictureSize.ui16Width < NI_MIN_WIDTH)
+        if (p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width % 4 ||
+          p_cfg->asOutputConfig[i].sOutputPictureSize.i16Width < NI_MIN_WIDTH)
         {
           //minimum supported dec is 128 but min enc is 144 so round up
           ni_strncpy(p_param_err, max_err_len,
@@ -10785,7 +10855,8 @@ ni_retcode_t ni_validate_custom_template(ni_session_context_t *p_ctx,
       LRETURN;
   }
 
-  if (p_cfg->i32bitRate <= p_cfg->i32frameRateInfo)
+  if (p_cfg->i32bitRate <=
+       ((p_cfg->i32frameRateInfo + p_cfg->i32frameRateDenominator - 1) / p_cfg->i32frameRateDenominator))
   {
     ni_strncpy(p_param_err, max_err_len, "Invalid i32bitRate: smaller than or equal to frame rate", max_err_len - 1);
     param_ret = NI_RETCODE_PARAM_ERROR_BRATE;
@@ -19267,3 +19338,308 @@ ni_retcode_t ni_set_cpu_affinity(ni_session_context_t *p_ctx)
 #endif
     return NI_RETCODE_SUCCESS;
 }
+
+#ifdef PRINT_FW_LOGS
+/**
+ * @brief Check if data starts with start marker
+ * @param data Pointer to data buffer
+ * @return true if start marker found, false otherwise
+ */
+static inline bool is_log_start_marker(const uint8_t* data) {
+    return (data[0] == FW_LOG_START_DELIMITER_0 && data[1] == FW_LOG_START_DELIMITER_1);
+}
+
+/**
+ * @brief Check if data starts with end marker
+ * @param data Pointer to data buffer
+ * @return true if end marker found, false otherwise
+ */
+static inline bool is_log_end_marker(const uint8_t* data) {
+    return (data[0] == FW_LOG_END_DELIMITER_0 && data[1] == FW_LOG_END_DELIMITER_1);
+}
+
+/**
+ * @brief Extract timestamp from little-endian bytes
+ * @param timestamp_bytes Pointer to 8-byte timestamp
+ * @return 64-bit timestamp value
+ */
+static inline uint64_t extract_timestamp(uint8_t* timestamp_bytes) {
+    uint64_t timestamp = 0;
+    // Little-endian extraction
+    for (int i = 0; i < 8; i++) {
+        timestamp |= ((uint64_t)timestamp_bytes[i] << (i * 8));
+    }
+    return timestamp;
+}
+
+/**
+ * @brief Search for complete log entries and find the one with latest timestamp
+ * @param data Pointer to data buffer containing log data
+ * @param data_size Size of data buffer
+ * @param latest_entry Pointer to store information about latest log entry
+ * @return void
+ */
+static void ni_find_latest_complete_log(const uint8_t* data, size_t data_size,
+                                       log_entry_info_t* latest_entry) {
+    int index = 0;
+    uint64_t timestamp = 0, max_timestamp = 0;
+    log_entry_header_t* header;
+    uint64_t data_start;
+    bool found_end;
+    const uint8_t* end_ptr;
+
+    // Initialize latest entry with default values
+    latest_entry->timestamp = 0;
+    latest_entry->wrap_around = false;
+    latest_entry->start_ptr = NULL;
+    latest_entry->end_ptr = NULL;
+
+    while (index < data_size - sizeof(log_entry_trailer_t)) {
+        // Search for start marker (0x5AA5)
+        if (!is_log_start_marker(data + index)) {
+            index++;
+            continue;
+        }
+
+        // Verify there's enough space for a complete log header
+        if (index + sizeof(log_entry_header_t) > data_size) {
+            break;
+        }
+
+        header = (log_entry_header_t*)(data + index);
+        timestamp = extract_timestamp(header->timestamp);
+
+        // Basic timestamp validation (skip invalid/zero timestamps)
+        if (timestamp == 0) {
+            index++;
+            continue;
+        }
+
+        data_start = index + sizeof(log_entry_header_t);
+        found_end = false;
+        end_ptr = NULL;
+
+        // Search for corresponding end marker (0xA55A)
+        for (uint64_t j = data_start; j < data_size - sizeof(log_entry_trailer_t); j++) {
+            if (is_log_end_marker(data + j)) {
+                found_end = true;
+                end_ptr = data + j + sizeof(log_entry_trailer_t); // Point after end marker
+                break;
+            }
+        }
+
+        if (found_end && end_ptr != NULL) {
+            // Track the entry with maximum timestamp (latest log)
+            if (timestamp > max_timestamp) {
+                max_timestamp = timestamp;
+                latest_entry->start_ptr = data + index;
+                latest_entry->end_ptr = end_ptr;
+                latest_entry->timestamp = timestamp;
+                latest_entry->wrap_around = false;
+            }
+            else
+            {
+              latest_entry->wrap_around = true;
+            }
+
+            // Continue search from after the end marker
+            index = end_ptr - data;
+        } else {
+            // No end marker found, continue searching
+            index++;
+        }
+    }
+
+    return ;
+}
+
+/**
+ * @brief Extract 64KB of data starting from end marker position
+ * @param data Pointer to source data buffer
+ * @param data_size Size of source data
+ * @param end_marker_ptr Pointer to end marker
+ * @param output Output buffer (must be PRINT_FW_LOG_SIZE)
+ * @param wrap_around Flag indicating if data should wrap around buffer
+ * @return void
+ */
+static void ni_extract_64k_from_end_marker(const uint8_t* data, size_t data_size,
+                                         const uint8_t* end_marker_ptr,
+                                         uint8_t* output, bool wrap_around) {
+    uint64_t end_marker_offset = end_marker_ptr - data;
+    uint64_t extract_start;
+
+    ni_log(NI_LOG_ERROR,"End marker position: %zu\n", end_marker_offset);
+
+    if (end_marker_offset >= PRINT_FW_LOG_SIZE) {
+        // Enough data available before end marker
+        extract_start = end_marker_offset - PRINT_FW_LOG_SIZE;
+        memcpy(output, data + extract_start, PRINT_FW_LOG_SIZE);
+    } else if (wrap_around) {
+        // Wrap around buffer: end + beginning
+        uint64_t first_part_size = PRINT_FW_LOG_SIZE - end_marker_offset;
+        uint64_t second_part_size = end_marker_offset;
+
+        memcpy(output, data + data_size - first_part_size, first_part_size);
+
+        if (second_part_size > 0) {
+            memcpy(output + first_part_size, data, second_part_size);
+        }
+    } else {
+        // Not enough usefull data, extract from beginning
+        memcpy(output, data, PRINT_FW_LOG_SIZE);
+    }
+
+    return ;
+}
+
+/**
+ * @brief Main function to find latest log and extract 64KB from its end
+ * @param data Input data buffer (must be CPU_LOG_BUFFER_SIZE)
+ * @param output Output buffer (must be PRINT_FW_LOG_SIZE)
+ * @return ni_retcode_t
+ */
+ni_retcode_t ni_extract_64k_from_latest_log_end(const uint8_t* data, uint8_t* output) {
+    ni_retcode_t ret = NI_RETCODE_SUCCESS;
+    log_entry_info_t entries;
+    if (data == NULL || output == NULL) {
+        return NI_RETCODE_INVALID_PARAM;
+    }
+
+    // Find all complete log entries
+    ni_find_latest_complete_log(data, CPU_LOG_BUFFER_SIZE, &entries);
+
+    if (entries.timestamp == 0) {
+        ni_log(NI_LOG_ERROR, "Get fw log timestamp == 0,"
+              " it is not expected, So will print the first 64K fw logs\n");
+        memcpy(output, data, PRINT_FW_LOG_SIZE);
+        return ret;
+    }
+
+    // Extract 64KB data
+    ni_extract_64k_from_end_marker(
+        data, CPU_LOG_BUFFER_SIZE, entries.end_ptr, output, entries.wrap_around);
+
+    return ret;
+}
+
+/**
+ * @brief Print firmware logs with proper formatting
+ * @param p_ctx Session context
+ * @param p_data Pointer to log data
+ * @param core_id Core identifier
+ * @return Return code indicating success or failure
+ */
+ni_retcode_t ni_device_print_firmware_logs(ni_session_context_t *p_ctx,
+                                          const uint8_t *p_data, uint32_t core_id) {
+    ni_retcode_t ret = NI_RETCODE_SUCCESS;
+    uint8_t *output = NULL;
+
+    if (!p_ctx || !p_data) {
+        ni_log2(p_ctx, NI_LOG_ERROR, "%s:%d: ERROR invalid pointer p_ctx %p\n",
+                __func__, __LINE__, p_ctx);
+        return NI_RETCODE_INVALID_PARAM;
+    }
+
+    ni_log(NI_LOG_ERROR, "%s start print %s log, session id %lu\n",
+           __func__, ni_get_core_name((ni_core_type_t)core_id), p_ctx->session_id);
+
+    // Allocate output buffer
+    output = malloc(PRINT_FW_LOG_SIZE);
+    if (output == NULL) {
+        ni_log(NI_LOG_ERROR, "Failed to allocate output buffer\n");
+        return NI_RETCODE_FAILURE;
+    }
+
+    // Extract 64KB data from latest log
+    ret = ni_extract_64k_from_latest_log_end(p_data, output);
+
+    // Print extracted data in 256-byte chunks with delimiters
+    if (ret == NI_RETCODE_SUCCESS) {
+        uint8_t print_buffer[260]; // 256 + 4 delimiter bytes
+        int chunks = PRINT_FW_LOG_SIZE / 256;
+
+        for (int i = 0; i < chunks; i++) {
+            uint8_t* ptr = print_buffer;
+
+            // Start delimiter
+            *ptr++ = 0x5B;
+            *ptr++ = 0xB5;
+
+            // Copy data chunk
+            memcpy(ptr, output + (i * 256), 256);
+            ptr += 256;
+
+            // End delimiter
+            *ptr++ = 0xB5;
+            *ptr++ = 0x5B;
+
+            // Print hex representation
+            for (int j = 0; j < sizeof(print_buffer); j++) {
+                ni_log(NI_LOG_ERROR, "%02X", print_buffer[j]);
+            }
+            ni_log(NI_LOG_ERROR, "\n");
+        }
+    } else {
+        ni_log(NI_LOG_ERROR, "%s failed ret %d\n", __func__, ret);
+    }
+    // Cleanup
+    free(output);
+    return ret;
+}
+
+/**
+ * @brief Retrieve and print firmware logs from all processor cores
+ *
+ * This function allocates a buffer, retrieves firmware logs from each core,
+ * processes them through the log formatting system, and prints them.
+ * It handles log collection for all supported cores (NP, EP, DP, TP, FP).
+ *
+ * @param p_ctx Session context containing device information and logging settings
+ * @return NI_RETCODE_SUCCESS on success, appropriate error code on failure
+ */
+ni_retcode_t ni_device_get_and_print_firmware_logs(ni_session_context_t *p_ctx)
+{
+    ni_retcode_t retval = NI_RETCODE_SUCCESS;
+    bool gen_log_file = false;
+    void *p_log_buffer = NULL;
+    int i;
+    if(!p_ctx)
+    {
+        ni_log2(p_ctx, NI_LOG_ERROR, "%s:():%d: ERROR invalid pointer p_ctx %p\n",
+                    __func__, __LINE__, p_ctx);
+        return NI_RETCODE_INVALID_PARAM;
+    }
+    ni_log(NI_LOG_ERROR, "%s enter, session_id %lu, blk_dev_name %s, hw_id %d\n",
+            __func__, p_ctx->session_id, p_ctx->blk_dev_name, p_ctx->hw_id);
+
+    if (ni_posix_memalign(&p_log_buffer, sysconf(_SC_PAGESIZE), CPU_LOG_BUFFER_SIZE))
+    {
+        ni_log2(p_ctx, NI_LOG_ERROR,  "ERROR %d: %s() Cannot allocate log buffer\n",
+                NI_ERRNO, __func__);
+        return NI_RETCODE_ERROR_MEM_ALOC;
+    }
+
+    for (i = NVME_CORE; i< NUM_OF_CORES; i++)
+    {
+        memset(p_log_buffer, 0, CPU_LOG_BUFFER_SIZE);
+        retval = ni_dump_log_single_core(p_ctx, p_log_buffer, i, gen_log_file);
+        if (retval != NI_RETCODE_SUCCESS)
+        {
+          ni_log2(p_ctx, NI_LOG_ERROR, "ni_dump_log_single_core failed\n");
+          LRETURN;
+        }
+
+        retval = ni_device_print_firmware_logs(p_ctx, p_log_buffer, i);
+        if (retval != NI_RETCODE_SUCCESS)
+        {
+          ni_log2(p_ctx, NI_LOG_ERROR, "ni_device_print_firmware_logs failed\n");
+          LRETURN;
+        }
+    }
+
+END:
+
+    ni_aligned_free(p_log_buffer);
+    return retval;
+}
+#endif

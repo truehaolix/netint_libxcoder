@@ -1,6 +1,21 @@
 #!/bin/bash
 echo Setting the date to $(date)
 
+TS_LOCK_FILE="/tmp/ni_host_ts_lock"
+LOCK_TIMEOUT=2  # Skip if called within last 2 seconds
+
+if [ -f "$TS_LOCK_FILE" ]; then
+    LOCK_MTIME=$(stat -c %Y "$TS_LOCK_FILE" 2>/dev/null || stat -f %m "$TS_LOCK_FILE" 2>/dev/null || echo 0)
+    LOCK_AGE=$(($(date +%s) - LOCK_MTIME))    
+    if [ $LOCK_AGE -lt $LOCK_TIMEOUT ]; then
+        echo "Host timestamp was set recently (${LOCK_AGE}s ago), skipping duplicate call"
+        exit 0
+    fi
+fi
+
+touch "$TS_LOCK_FILE"
+
+
 function set_sudo() {
     if [[ $(whoami) == "root" ]]; then
         SUDO=""
@@ -11,7 +26,8 @@ function set_sudo() {
 function check_nvme_cli() {
     if (! [[ -x "$(command -v nvme)" ]]) && (! [[ -x "$(${SUDO}which nvme)" ]]); then
         echo "Error: NVMe-CLI is not installed. Please install it and try again!" >&2
-        exit 1
+        rm -f "$TS_LOCK_FILE"
+	exit 1
     fi
     return 0
 }
@@ -46,3 +62,4 @@ for NVME_NODE in "${XCOD_DATA[@]}"; do
     echo -n -e ${escaped_string} | ${SUDO} nvme set-feature "$CONTROLLER_NODE" --feature-id=0x0e --data-len=8 > /dev/null
 done
 
+touch "$TS_LOCK_FILE"

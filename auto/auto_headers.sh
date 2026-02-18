@@ -75,6 +75,12 @@ else
     echo "#undef XCODER_ENABLE_CPU_AFFINITY" >> $XCODER_AUTO_HEADERS_H
 fi
 
+if [ $XCODER_PRINT_FW_LOGS = YES ]; then
+    echo "#define PRINT_FW_LOGS" >> $XCODER_AUTO_HEADERS_H
+else
+    echo "#undef PRINT_FW_LOGS" >> $XCODER_AUTO_HEADERS_H
+fi
+
 echo "" >> $XCODER_AUTO_HEADERS_H
 
 

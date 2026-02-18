@@ -402,7 +402,8 @@ typedef enum
   PIC_TYPE_CRA = 4,
   PIC_TYPE_IDR = 3,                  /*!*< Encoder IDR pic type */
   DECODER_PIC_TYPE_IDR = 5,          /*!*< Decoder-returned IDR pic type */
-  PIC_TYPE_NIDR = 5,                  /*!*< H.264/H.265 IDR picture */
+  PIC_TYPE_NIDR = 5,                 /*!*< H.264/H.265 IDR picture */
+  PIC_NOT_CODED = 6,                 /*!*< Picture dropped in encoder */
   PIC_TYPE_MAX                       /*!*< No Meaning */
 } ni_pic_type_t;
 
@@ -1761,6 +1762,7 @@ typedef struct _ni_session_context
 
     uint32_t headers_length;
     uint32_t last_frame_dropped;
+    uint8_t pending_bitstream_buffer_realloc;
 } ni_session_context_t;
 
 typedef struct _ni_split_context_t
@@ -2237,6 +2239,7 @@ NI_DEPRECATE_MACRO(NI_ENC_PARAM_MAX_FRAME_SIZE_LOW_DELAY)
 #define NI_ENC_PARAM_ADAPTIVE_LAMDA_MODE "adaptiveLamdaMode"
 #define NI_ENC_PARAM_ADAPTIVE_CRF_MODE "adaptiveCrfMode"
 #define NI_ENC_PARAM_INTRA_COMPENSATE_MODE "intraCompensateMode"
+#define NI_ENC_PARAM_CUSTOM_MIN_COEFF_DIV "customMinCoeffDiv"
 // stream color info
 #define NI_ENC_PARAM_COLOR_PRIMARY "colorPri"
 #define NI_ENC_PARAM_COLOR_TRANSFER_CHARACTERISTIC "colorTrc"
@@ -2531,6 +2534,7 @@ NI_DEPRECATE_MACRO(NI_ENC_PARAM_MAX_FRAME_SIZE_LOW_DELAY)
     int adaptiveLamdaMode;
     int adaptiveCrfMode;
     int intraCompensateMode;
+    int customMinCoeffDiv;
 } ni_encoder_cfg_params_t;
 
 typedef struct _ni_decoder_input_params_t
@@ -2568,6 +2572,7 @@ typedef struct _ni_decoder_input_params_t
 #define NI_DEC_PARAM_FORCE_LOW_DELAY "forceLowDelay"
 #define NI_DEC_PARAM_MIN_PACKETS_DELAY "minPacketsDelay"
 #define NI_DEC_PARAM_ENABLE_LOW_DELAY_CHECK "enableLowDelayCheck"
+#define NI_DEC_PARAM_DISABLE_REORDER "disableReorder"
 #define NI_DEC_PARAM_ENABLE_USR_DATA_SEI_PASSTHRU "enableUserDataSeiPassthru"
 #define NI_DEC_PARAM_ENABLE_CUSTOM_SEI_PASSTHRU "customSeiPassthru"
 #define NI_DEC_PARAM_SVC_T_DECODING_LAYER "svctDecodingLayer"
@@ -2631,6 +2636,7 @@ typedef struct _ni_decoder_input_params_t
     int survive_stream_err;
     int reduce_dpb_delay;
     int skip_extra_headers;
+    int decoder_disable_reorder;
 } ni_decoder_input_params_t;
 
 typedef struct _ni_scaler_input_params_t
@@ -2809,6 +2815,9 @@ typedef struct _ni_frame
     //for AI non-4k-aligned memory buffer
     uint32_t iovec_num;
     ni_iovec_t *iovec;
+
+    // offset to be adjusted in FW for zero copy - obtain from ni_encoder_frame_zerocopy_adjust
+    uint16_t hor_adjust_offset;
 } ni_frame_t;
 
 typedef struct _ni_xcoder_params
@@ -4880,6 +4889,32 @@ LIB_API ni_retcode_t ni_encoder_frame_zerocopy_check(ni_session_context_t *p_enc
                                                int width, int height,
                                                const int linesize[],
                                                bool set_linesize);
+
+/*!*****************************************************************************
+  *  \brief  Check if the frame data transferred is within a frame boundary and
+  *          adjust with offset if it doesn't. EP will re-adjust the data pointer
+  *          to the correct start address.
+  *
+  *  \param[in] video_height  Height of the video frame
+  *        [in] linesize      Picture line size after filtering (i.e. cropping)
+  *        [in] data          Picture data pointers after filtering (for each of YUV planes)
+  *        [in] buf_size0     Y frame size before any filtering (original size)
+  *        [in] buf_size1     U frame size before any filtering (original)
+  *        [in] buf_size2     V frame size before any filtering (original)
+  *        [in] buf_data0     Y picture data pointer before any filtering (original)
+  *        [in] buf_data1     U picture data pointer before any filtering (original)
+  *        [in] buf_data2     V picture data pointer before any filtering (original)
+  *
+  *  \return On success
+  *                          NI_RETCODE_SUCCESS
+  *          On failure
+  *                          NI_RETCODE_INVALID_PARAM
+  *****************************************************************************/
+LIB_API ni_retcode_t ni_encoder_frame_zerocopy_adjust(ni_session_context_t *p_enc_ctx,
+                                            ni_frame_t *p_frame, int video_height,
+                                            const int linesize[], const uint8_t *data[],
+                                            int buf_size0, int buf_size1, int buf_size2,
+                                            uint8_t *buf_data0, uint8_t *buf_data1, uint8_t *buf_data2);
 
 /*!*****************************************************************************
   *  \brief  Allocate memory for encoder zero copy (metadata, etc.)

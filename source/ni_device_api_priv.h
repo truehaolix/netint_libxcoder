@@ -258,7 +258,8 @@ typedef struct _ni_metadata_enc_frame
   uint16_t              start_len[3];
   uint8_t                inconsecutive_transfer;
   uint8_t                get_recon_frame_mode;
-  uint32_t               ui32Reserved[2];
+  uint16_t               hor_adjust_offset;
+  uint16_t               ui16Reserved[3];
 } ni_metadata_enc_frame_t;
 
 typedef struct _ni_metadata_enc_bstream_rev61
@@ -673,6 +674,7 @@ typedef struct _ni_encoder_config_t
   uint8_t ui8getCuInfo;
   uint8_t ui8adaptiveCrfMode;
   uint8_t ui8intraCompensateMode;
+  uint8_t ui8customMinCoeffDiv;
 } ni_encoder_config_t;
 
 
@@ -930,8 +932,8 @@ typedef struct {
 }ni_decode_cropping_rectangle;
 
 typedef struct {
-  uint16_t                    ui16Height;
-  uint16_t                    ui16Width;
+  int16_t                     i16Height;
+  int16_t                     i16Width;
 }ni_decoder_output_picture_size;
 
 typedef struct {
@@ -1068,6 +1070,39 @@ typedef enum
 #define NI_FW_ENC_BITSTREAM_META_DATA_SIZE_UNDER_MAJOR_6_MINOR_rc 88
 // size of meta data sent together with bitstream: from f/w encoder to app for FW/SW before rev 6sM
 #define NI_FW_ENC_BITSTREAM_META_DATA_SIZE_UNDER_MAJOR_6_MINOR_sM 112
+
+// Log delimiter definitions
+#define FW_LOG_START_DELIMITER_0 0x5A
+#define FW_LOG_START_DELIMITER_1 0xA5
+#define FW_LOG_END_DELIMITER_0 0xA5
+#define FW_LOG_END_DELIMITER_1 0x5A
+
+/**
+ * @brief Log entry header structure
+ */
+typedef struct {
+    uint8_t start_marker[2];
+    uint8_t timestamp[8];     // Little-endian timestamp
+    uint8_t key[4];
+} log_entry_header_t;
+
+/**
+ * @brief Log entry trailer structure
+ */
+typedef struct {
+    uint8_t end_marker[2];
+} log_entry_trailer_t;
+
+/**
+ * @brief Log entry information structure
+ */
+typedef struct {
+    const uint8_t* start_ptr;      // Pointer to log start
+    const uint8_t* end_ptr;        // Pointer after end marker
+    uint64_t timestamp;            // Extracted timestamp
+    bool wrap_around;
+} log_entry_info_t;
+
 
 int ni_create_frame(ni_frame_t* p_frame, uint32_t read_length,
                     uint64_t* frame_offset, uint32_t* frame_dropped, bool is_hw_frame);

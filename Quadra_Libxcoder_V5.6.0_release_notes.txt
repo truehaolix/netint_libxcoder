@@ -1,4 +1,37 @@
 ================================================================================
+Release version: 5.6.0_RC3
+Date: 2026-02-12            SW version: 5.6.0_RC3           FW version: 5.6.0_RC3
+Compat FW API ver: 6sV      Libxcoder API ver: 2.85
+--------------------------------------------------------------------------------
+[LIBXCODER] Interprete encoder returned frame types I=0, P=1, B=2, Not coded=3 since all I frames are IDR
+            - 0 as PIC_TYPE_IDR and 3 as PIC_NOT_CODED for ni_packet_t frame_type
+            - Changing Libxcoder API version to 2.85
+[LIBXCODER] Corner case handling when fractional fps denominator is 1001
+[LIBXCODER] Changed to set ni_pict_type to PIC_TYPE_IDR instead of PIC_TYPE_I
+[LIBXCODER] Fix zerocopy_adjust when input is in semiplanar format
+[LIBXCODER] Check correctness count uses device name lookup for queues
+[LIBXCODER] Support adaptiveCrfMode=2, reccalculate crf every second
+            Changing FW API version to 6sV
+[LIBXCODER] Add fifo to temporarily hold more input packets when decoder write buffer full
+            Changing Libxcoder API version to 2.84
+[LIBXCODER] Fixed 8k 10 bit SW crop to 4th quarter + quadra_enc
+            Detect if transfer address goes over frame boundary and find horAdjustOffset in ni_encoder_frame_zerocopy_adjust
+            If so and send the offset throguh metadata to EP
+            Changing FW API version to 6sU
+            Changing Libxcoder API version to 2.83
+[LIBXCODER] Added the support of scaleX=(-n)x(height) and scaleX=(width)x(-n) for PPU scaling
+            Changing FW API version to 6sT
+[LIBXCODER] Move power calculation back to FW to support power throttling
+[LIBXCODER] Fix an issue with framerate calcuation
+[LIBXCODER] Add param customMinCoeffDiv
+            Changing FW API version to 6sR
+[LIBXCODER] Added 'disableReorder' decoder xcoder parameter
+[LIBXCODER] Avoid duplicate set timestamp calls
+[LIBXCODER] Support minFramesDelay=2 for constant frame delay
+[LIBXCODER] FPS handling for all values
+[LIBXCODER] Dump and print 64K fw logs when check_err_rc port error
+            - Open this feature need compile libxcoder with --print-fw-logs
+================================================================================
 Release version: 5.5.0_RC2
 Date: 2025-12-08            SW version: 5.5.0_RC2           FW version: 5.5.0_RC2
 Compat FW API ver: 6sQ      Libxcoder API ver: 2.82

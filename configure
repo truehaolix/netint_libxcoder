@@ -212,3 +212,9 @@ if [ $SETUP_SYSTEMD = YES ]; then
 else
         echo -e "${YELLOW}SETUP_SYSTEMD is disabled${BLACK}"
 fi
+
+if [ $XCODER_PRINT_FW_LOGS = YES ]; then
+	echo -e "${GREEN}XCODER_PRINT_FW_LOGS is enabled${BLACK}"
+else
+	echo -e "${YELLOW}XCODER_PRINT_FW_LOGS is disabled${BLACK}"
+fi

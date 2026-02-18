@@ -17,6 +17,7 @@ info_level_ssim_log=false;
 enable_cpu_affinity=false;
 setup_systemd=false;
 deprecation_as_error=false;
+print_fw_logs=false;
 RC=0
 
 while [ "$1" != "" ]; do
@@ -43,7 +44,8 @@ while [ "$1" != "" ]; do
                          echo "-c, --enable-cpu-affinity        compile with cpu affinity on multi-NUMA node linux server. Default is disable";
                          echo "--doxygen                        compile Doxygen (does not compile libxcoder)";
                          echo "--setup-systemd                  install systemd service to initialize libxcoder";
-                         echo "--deprecation-as-error           compile without deprecated macros, functions and variables"; exit 0
+                         echo "--deprecation-as-error           compile without deprecated macros, functions and variables";
+                         echo "--print-fw-logs                  compile with dumping fw logs when fw return errors"; exit 0;
         ;;
         -w | windows)                   target_windows=true
         ;;
@@ -78,6 +80,8 @@ while [ "$1" != "" ]; do
         --setup-systemd)                setup_systemd=true
         ;;
         --deprecation-as-error)         deprecation_as_error=true
+        ;;
+        --print-fw-logs)                print_fw_logs=true
         ;;
         *)               echo "Usage: ./build.sh [OPTION]..."; echo "Try './build.sh --help' for more information"; exit 1
         ;;
@@ -173,6 +177,10 @@ fi
 
 if $deprecation_as_error; then
     extra_make_flags="${extra_make_flags} DEPRECATION_AS_ERROR=TRUE"
+fi
+
+if $print_fw_logs; then
+    extra_config_flags="${extra_config_flags} --with-print-fw-logs"
 fi
 
 # configure, build, and install

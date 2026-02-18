@@ -241,6 +241,7 @@ typedef ni_retcode_t (LIB_API* PNIQUERYVFNSID) (ni_device_handle_t device_handle
 typedef ni_retcode_t (LIB_API* PNIQUERYTEMPERATURE) (ni_device_handle_t device_handle, ni_device_temp_t *p_dev_temp, uint8_t fw_rev[]);
 typedef ni_retcode_t (LIB_API* PNIQUERYEXTRAINFO) (ni_device_handle_t device_handle, ni_device_extra_info_t *p_dev_extra_info, uint8_t fw_rev[]);
 typedef ni_retcode_t (LIB_API* PNIENCODERFRAMEZEROCOPYCHECK) (ni_session_context_t *p_enc_ctx, ni_xcoder_params_t *p_enc_params, int width, int height, const int linesize[], bool set_linesize);
+typedef ni_retcode_t (LIB_API* PNIENCODERFRAMEZEROCOPYADJUST) (ni_session_context_t *p_enc_ctx, ni_frame_t *p_frame, int video_height, const int linesize[], const uint8_t *data[], int buf_size0, int buf_size1, int buf_size2, uint8_t *buf_data0, uint8_t *buf_data1, uint8_t *buf_data2);
 typedef ni_retcode_t (LIB_API* PNIENCODERFRAMEZEROCOPYBUFFERALLOC) (ni_frame_t *p_frame, int video_width, int video_height, const int linesize[], const uint8_t *data[], int extra_len);
 typedef ni_retcode_t (LIB_API* PNIUPLOADERFRAMEZEROCOPYCHECK) (ni_session_context_t *p_upl_ctx, int width, int height, const int linesize[], int pixel_format);
 typedef ni_retcode_t (LIB_API* PNIRECONFIGCRF) (ni_session_context_t *p_ctx, int32_t crf);
@@ -455,6 +456,7 @@ typedef struct _NETINT_LIBXCODER_API_FUNCTION_LIST
     PNIQUERYTEMPERATURE                  niQueryTemperature;                   /** Client should access ::ni_query_temperature API through this pointer */
     PNIQUERYEXTRAINFO                    niQueryExtraInfo;                     /** Client should access ::ni_query_extra_info API through this pointer */
     PNIENCODERFRAMEZEROCOPYCHECK         niEncoderFrameZerocopyCheck;          /** Client should access ::ni_encoder_frame_zerocopy_check API through this pointer */
+    PNIENCODERFRAMEZEROCOPYADJUST        niEncoderFrameZerocopyAdjust;         /** Client should access ::ni_encoder_frame_zerocopy_adjust API through this pointer */
     PNIENCODERFRAMEZEROCOPYBUFFERALLOC   niEncoderFrameZerocopyBufferAlloc;    /** Client should access ::ni_encoder_frame_zerocopy_buffer_alloc API through this pointer */
     PNIUPLOADERFRAMEZEROCOPYCHECK        niUploaderFrameZerocopyCheck;         /** Client should access ::ni_uploader_frame_zerocopy_check API through this pointer */
     PNIRECONFIGCRF                       niReconfigCrf;                        /** Client should access ::ni_reconfig_crf API through this pointer */
@@ -677,6 +679,7 @@ public:
         functionList->niQueryTemperature = reinterpret_cast<decltype(ni_query_temperature)*>(dlsym(lib,"ni_query_temperature"));
         functionList->niQueryExtraInfo = reinterpret_cast<decltype(ni_query_extra_info)*>(dlsym(lib,"ni_query_extra_info"));
         functionList->niEncoderFrameZerocopyCheck = reinterpret_cast<decltype(ni_encoder_frame_zerocopy_check)*>(dlsym(lib,"ni_encoder_frame_zerocopy_check"));
+        functionList->niEncoderFrameZerocopyAdjust = reinterpret_cast<decltype(ni_encoder_frame_zerocopy_adjust)*>(dlsym(lib,"ni_encoder_frame_zerocopy_adjust"));
         functionList->niEncoderFrameZerocopyBufferAlloc = reinterpret_cast<decltype(ni_encoder_frame_zerocopy_buffer_alloc)*>(dlsym(lib,"ni_encoder_frame_zerocopy_buffer_alloc"));
         functionList->niUploaderFrameZerocopyCheck = reinterpret_cast<decltype(ni_uploader_frame_zerocopy_check)*>(dlsym(lib,"ni_uploader_frame_zerocopy_check"));
         functionList->niReconfigCrf = reinterpret_cast<decltype(ni_reconfig_crf)*>(dlsym(lib,"ni_reconfig_crf"));

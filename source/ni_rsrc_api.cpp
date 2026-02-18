@@ -426,6 +426,7 @@ ni_device_pool_t* ni_rsrc_get_device_pool(void)
   if (NULL == map_file_handle)
   {
       ReleaseMutex(mutex_handle);
+      CloseHandle(mutex_handle);
       ni_log(NI_LOG_ERROR, "Could not open file mapping object %s, error: %d\n",
              CODERS_SHM_NAME, NI_ERRNO);
       return NULL;
@@ -442,6 +443,7 @@ ni_device_pool_t* ni_rsrc_get_device_pool(void)
   if (NULL == p_device_queue)
   {
     ReleaseMutex(mutex_handle);
+    CloseHandle(mutex_handle);
     CloseHandle(map_file_handle);
     return NULL;
   }

@@ -3021,6 +3021,141 @@ ni_retcode_t ni_encoder_frame_zerocopy_check(ni_session_context_t *p_enc_ctx,
 }
 
 /*!*****************************************************************************
+  *  \brief  Check if the frame data transferred is within a frame boundary and
+  *          adjust with offset if it doesn't. EP will re-adjust the data pointer
+  *          to the correct start address.
+  *
+  *  \param[in] video_height  Height of the video frame after filtering
+  *        [in] linesize      Picture line size after filtering (i.e. cropping)
+  *        [in] data          Picture data pointers after filtering (for each of YUV planes)
+  *        [in] buf_size0     Y frame size before any filtering (original size)
+  *        [in] buf_size1     U frame size before any filtering (original)
+  *        [in] buf_size2     V frame size before any filtering (original)
+  *        [in] buf_data0     Y picture data pointer before any filtering (original)
+  *        [in] buf_data1     U picture data pointer before any filtering (original)
+  *        [in] buf_data2     V picture data pointer before any filtering (original)
+  *
+  *  \return On success
+  *                          NI_RETCODE_SUCCESS
+  *          On failure
+  *                          NI_RETCODE_INVALID_PARAM
+  *****************************************************************************/
+ni_retcode_t ni_encoder_frame_zerocopy_adjust(
+    ni_session_context_t *p_enc_ctx,
+    ni_frame_t *p_frame, int video_height,
+    const int linesize[], const uint8_t *data[],
+    int buf_size0, int buf_size1, int buf_size2,
+    uint8_t *buf_data0, uint8_t *buf_data1, uint8_t *buf_data2)
+{
+    int retval = NI_RETCODE_SUCCESS;
+
+    if (!p_frame || !p_enc_ctx || !data || !linesize)
+    {
+        ni_log(NI_LOG_ERROR, "ERROR: %s: null parameters: p_frame=%p, p_enc_ctx=%p, linesize=%p, data=%p\n",
+               __func__, p_frame, p_enc_ctx, linesize, data);
+        return NI_RETCODE_INVALID_PARAM;
+    }
+
+    // Only newer firmware versions (6sU and above) support zero-copy with SW cropping corner
+    // case handling. See the brief of this function.
+    if (ni_cmp_fw_api_ver((char*)&p_enc_ctx->fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX], "6sU") < 0)
+    {
+        p_frame->hor_adjust_offset = 0;
+        return NI_RETCODE_SUCCESS;
+    }
+
+    const uint8_t *buf_data[3] = { buf_data0, buf_data1, buf_data2 };
+    const int buf_size[3] = { buf_size0, buf_size1, buf_size2 };
+    const uint8_t *end_used, *end_alloc;
+    int offset = 0;
+    int i;
+
+    // num_planes = 1 if frame is directly from quadra decoder (out=sw) or from raw YUV file
+    // num_planes = actual number of planes if frame is from ffmpeg SW decoder or after ffmpeg
+    // pixel format conversion or after hwdownload from quadra decoder (out=hw)
+    const int num_planes = (buf_size[2] != 0) ? 3 : (buf_size[1] != 0) ? 2 : 1;
+
+    // In case of num_planes==1, only index 0 of buf_data[] and buf_size[] exist,
+    // but all 3 indices of data[] and linesize[] are available for yuv420p and 2 for nv12.
+    // The same applies to both 8 and 10 bit pixel formats
+    for (i = 0; i < num_planes; i++)
+    {
+        if (!data[i] || !buf_data[i] || buf_size[i] <= 0)
+        {
+            ni_log(NI_LOG_ERROR, "ERROR: %s: invalid parameter %d: data=%p, buf_data=%p, size=%d\n",
+                   __func__, i, data[i], buf_data[i], buf_size[i]);
+            return NI_RETCODE_INVALID_PARAM;
+        }
+
+        int plane_height = video_height >> (i > 0 ? 1 : 0);
+
+        // End of used data after filtering (e.g., cropping)
+        if(num_planes == 1)
+        {
+            // Find end address used by last plane since it can reach the end of the buffer and buf_data[0] contains all YUV
+            if (data[2])
+            {
+                // Planar pixel format if 3 data pointers are present
+                end_used = data[2] + linesize[2] * (video_height >> 1);
+            }
+            else if (data[1])
+            {
+                // Semiplanar pixel format if only 2 data pointers are present
+                end_used = data[1] + linesize[1] * (video_height >> 1);
+            }
+            else
+            {
+                ni_log(NI_LOG_ERROR, "ERROR: %s: Single-plane pixel format not supported\n", __func__);
+                return NI_RETCODE_INVALID_PARAM;
+            }
+        }
+        else
+        {
+            // Find Y, U, and V end address used
+            end_used  = data[i] + linesize[i] * plane_height;
+        }
+
+        // End address of original allocated buffer.
+        end_alloc = buf_data[i] + buf_size[i];
+
+        // Positive offset means filtered data to be transferred by zerocopy exceeds original buffer
+        int plane_offset = (int)(end_used - end_alloc);
+        plane_offset = (plane_offset > 0) ? plane_offset : 0;
+
+        if(num_planes == 1)
+        {
+            if (data[2])
+            {
+                offset = plane_offset * 2;
+                ((uint8_t **)data)[0] -= offset;
+                ((uint8_t **)data)[1] -= plane_offset;
+                ((uint8_t **)data)[2] -= plane_offset;
+            }
+            else
+            {
+                offset = plane_offset;
+                ((uint8_t **)data)[0] -= plane_offset;
+                ((uint8_t **)data)[1] -= plane_offset;
+            }
+        }
+        else
+        {
+            ((uint8_t **)data)[i] -= plane_offset;
+            if (i == 0)
+            {
+                offset = plane_offset;
+            }
+        }
+
+        ni_log(NI_LOG_DEBUG, "%s: plane %d offset %d\n", __func__, i, offset);
+    }
+
+    p_frame->hor_adjust_offset = offset;
+
+    return retval;
+}
+
+/*!*****************************************************************************
   *  \brief  Allocate memory for encoder zero copy (metadata, etc.)
   *          for encoding based on given
   *          parameters, taking into account pic linesize and extra data.
@@ -4621,6 +4756,7 @@ ni_retcode_t ni_encoder_init_default_params(ni_xcoder_params_t *p_param,
     p_enc->av1OpLevel[i] = 0;
   }
   p_enc->intraCompensateMode = 0;
+  p_enc->customMinCoeffDiv = 0;
 
   if (codec_format == NI_CODEC_FORMAT_AV1)
   {
@@ -4788,6 +4924,7 @@ ni_retcode_t ni_decoder_init_default_params(ni_xcoder_params_t *p_param,
   p_dec->decoder_low_delay = 0;
   p_dec->force_low_delay = false;
   p_dec->enable_low_delay_check = 0;
+  p_dec->decoder_disable_reorder = 0;
   p_dec->enable_user_data_sei_passthru = 0;
   p_dec->custom_sei_passthru = -1;
   p_dec->svct_decoding_layer = NI_INVALID_SVCT_DECODING_LAYER;
@@ -5608,6 +5745,14 @@ ni_retcode_t ni_decoder_params_set_value(ni_xcoder_params_t *p_params,
       }
       p_dec->enable_low_delay_check = atoi(value);
   }
+  OPT(NI_DEC_PARAM_DISABLE_REORDER)
+  {
+      if (atoi(value) < 0)
+      {
+          return NI_RETCODE_PARAM_ERROR_OOR;
+      }
+      p_dec->decoder_disable_reorder = atoi(value);
+  }
   OPT(NI_DEC_PARAM_MIN_PACKETS_DELAY)
   {
       if ((atoi(value) != 0) && (atoi(value) != 1))
@@ -5934,7 +6079,7 @@ ni_retcode_t ni_encoder_params_set_value(ni_xcoder_params_t *p_params,
   }
   OPT (NI_ENC_PARAM_MIN_FRAMES_DELAY)
   {
-       if (0 != atoi(value) && 1 != atoi(value))
+       if (atoi(value) < 0 || atoi(value) > 2)
        {
           return NI_RETCODE_PARAM_ERROR_OOR;
        }
@@ -7497,7 +7642,7 @@ ni_retcode_t ni_encoder_params_set_value(ni_xcoder_params_t *p_params,
   }
   OPT(NI_ENC_PARAM_ADAPTIVE_CRF_MODE)
   {
-    if (atoi(value) < 0 || atoi(value) > 1)
+    if (atoi(value) < 0 || atoi(value) > 2)
     {
       return NI_RETCODE_PARAM_ERROR_OOR;
     }
@@ -7510,6 +7655,14 @@ ni_retcode_t ni_encoder_params_set_value(ni_xcoder_params_t *p_params,
       return NI_RETCODE_PARAM_ERROR_OOR;
     }
     p_enc->intraCompensateMode = atoi(value);
+  }
+  OPT(NI_ENC_PARAM_CUSTOM_MIN_COEFF_DIV)
+  {
+    if (atoi(value) < 0 || atoi(value) > 255)
+    {
+      return NI_RETCODE_PARAM_ERROR_OOR;
+    }
+    p_enc->customMinCoeffDiv = atoi(value);
   }
   else { return NI_RETCODE_PARAM_INVALID_NAME; }
 
@@ -12063,7 +12216,8 @@ ni_retcode_t ni_query_extra_info(ni_device_handle_t device_handle,
     p_dev_extra_info->power_consumption = p_dev_extra_info_data->power_consumption;
   }
   //QUADPV-1210-Remove ADC current measurement decoding from FW
-  if (ni_cmp_fw_api_ver((char*) &fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX], "6s4") >=0)
+  if (ni_cmp_fw_api_ver((char*) &fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX], "6s4") >= 0 &&
+      ni_cmp_fw_api_ver((char*) &fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX], "6sR") <= 0)
   {
     p_dev_extra_info->current_consumption = p_dev_extra_info_data->current_consumption;
     ni_device_capability_t device_capability = {0};

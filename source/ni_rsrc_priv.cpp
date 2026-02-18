@@ -513,7 +513,7 @@ bool add_to_shared_memory(const char device_name[NI_MAX_DEVICE_NAME_LEN],
   ret_ts = system("host_ts.sh");
   if (ret_ts != 0)
   {
-    printf("Unable to send Host time\n");
+        ni_log(NI_LOG_ERROR,"Unable to send Host time\n");
   }
 #endif
 
@@ -814,6 +814,7 @@ int ni_rsrc_init_priv(const int should_match_rev,
         ni_log(NI_LOG_ERROR, "ERROR %d: failed to obtain mutex: %p\n",
                 NI_ERRNO, lock);
         ReleaseMutex(lock);
+        CloseHandle(lock);
         UnmapViewOfFile(p_device_queue);
         CloseHandle(map_file_handle);
         return NI_RETCODE_FAILURE;
@@ -826,11 +827,17 @@ int ni_rsrc_init_priv(const int should_match_rev,
 
     UnmapViewOfFile(p_device_queue);
     ReleaseMutex(lock);
+    CloseHandle(lock);
     return NI_RETCODE_SUCCESS;
 }
 
 #elif __linux__ || __APPLE__
 
+
+typedef struct {
+int32_t guid;
+char dev_name[NI_MAX_DEVICE_NAME_LEN];
+} guid_name_map_t;
 /**
  * @brief This function is used to check if the existing device queue matches the expectation.
 */
@@ -840,13 +847,53 @@ static bool check_correctness_count(const ni_device_queue_t *existing_device_que
                                     const char device_names[NI_MAX_DEVICE_CNT][NI_MAX_DEVICE_NAME_LEN])
 {
     int i, j, k;
+    uint32_t queue_idx;
+    int32_t guid;
+    bool device_found_in_queue;
 
     ni_device_capability_t device_capability;
     ni_device_handle_t device_handle;
     ni_device_queue_t device_queue;
+    ni_device_context_t *device_context;
+
+    guid_name_map_t guid_map[NI_DEVICE_TYPE_XCODER_MAX][NI_MAX_DEVICE_CNT];
+    uint32_t guid_map_count[NI_DEVICE_TYPE_XCODER_MAX] = {0};
 
     memset(device_queue.xcoder_cnt, 0, sizeof(device_queue.xcoder_cnt));
 
+    // PHASE 1: GUID to device name mapping for all device types
+    for (j = NI_DEVICE_TYPE_DECODER; j < NI_DEVICE_TYPE_XCODER_MAX; j++)
+    {
+        for (queue_idx = 0; queue_idx < existing_device_queue->xcoder_cnt[j]; queue_idx++)
+        {
+            guid = existing_device_queue->xcoders[j][queue_idx];
+            if (guid < 0 || guid >= NI_MAX_DEVICE_CNT)
+            {
+                continue;
+            }
+            device_context = ni_rsrc_get_device_context((ni_device_type_t)j, guid);
+            if (device_context && device_context->p_device_info)
+            {
+                if (guid_map_count[j] >= NI_MAX_DEVICE_CNT)
+                {
+                    ni_log(NI_LOG_ERROR, "ERROR: %s(): guid_map_count[%d] exceeds NI_MAX_DEVICE_CNT\n", __func__, j);
+                    ni_rsrc_free_device_context(device_context);
+                    return false;
+                }
+                guid_map[j][guid_map_count[j]].guid = guid;
+                ni_strncpy(guid_map[j][guid_map_count[j]].dev_name, NI_MAX_DEVICE_NAME_LEN,
+                           device_context->p_device_info->dev_name, NI_MAX_DEVICE_NAME_LEN - 1);
+                guid_map_count[j]++;
+                ni_rsrc_free_device_context(device_context);
+            }
+            else if (device_context)
+            {
+                ni_rsrc_free_device_context(device_context);
+            }
+        }
+    }
+
+    // PHASE 2: Check against pre-built maps
     for (i = 0; i < existing_number_of_devices; i++)
     {
         device_handle = ni_device_open2(device_names[i], NI_DEVICE_READ_ONLY);
@@ -854,7 +901,6 @@ static bool check_correctness_count(const ni_device_queue_t *existing_device_que
         {
             continue;
         }
-
         memset(&device_capability, 0, sizeof(ni_device_capability_t));
         if (ni_device_capability_query2(device_handle, &device_capability, false) != NI_RETCODE_SUCCESS || \
             !is_supported_xcoder(device_capability.device_is_xcoder) ||
@@ -862,33 +908,50 @@ static bool check_correctness_count(const ni_device_queue_t *existing_device_que
              ((uint8_t) device_capability.fw_rev[NI_XCODER_REVISION_API_MAJOR_VER_IDX] != \
               (uint8_t) NI_XCODER_REVISION[NI_XCODER_REVISION_API_MAJOR_VER_IDX])))
         {
-            goto NEXT;
+            ni_device_close(device_handle);
+            continue;
         }
-
         for (j = NI_DEVICE_TYPE_DECODER; j < NI_DEVICE_TYPE_XCODER_MAX; j++)
         {
-            //Don't count if not in queue.
-            if (existing_device_queue->xcoders[j][i] == -1 && device_capability.xcoder_cnt[j] != 0)
+            if (device_capability.xcoder_cnt[j] == 0)
             {
-                //If not in queue then it shouldn't be in any device module.
+                continue;
+            }
+            device_found_in_queue = false;
+            for (queue_idx = 0; queue_idx < guid_map_count[j]; queue_idx++)
+            {
+                if (strncmp(device_names[i], guid_map[j][queue_idx].dev_name, NI_MAX_DEVICE_NAME_LEN) == 0)
+                {
+                    device_found_in_queue = true;
+                    break;
+                }
+            }
+            if (!device_found_in_queue)
+            {
                 for (k = NI_DEVICE_TYPE_DECODER; k < NI_DEVICE_TYPE_XCODER_MAX; k++)
                 {
-                    if (existing_device_queue->xcoders[k][i] != -1)
+                    if (k == j)
                     {
-                        ni_log(NI_LOG_ERROR,
-                               "ERROR: %s(): Discovered device %s is not in queue for module %s but is in %s\n",
-                               __func__,
-                               device_names[i],
-                               GET_XCODER_DEVICE_TYPE_STR(j), GET_XCODER_DEVICE_TYPE_STR(k));
-                        ni_device_close(device_handle);
-                        return false;
+                        continue;
+                    }
+                    for (queue_idx = 0; queue_idx < guid_map_count[k]; queue_idx++)
+                    {
+                        if (strncmp(device_names[i], guid_map[k][queue_idx].dev_name, NI_MAX_DEVICE_NAME_LEN) == 0)
+                        {
+                            ni_log(NI_LOG_ERROR,
+                                   "ERROR: %s(): Discovered device %s is not in queue for module %s but is in %s\n",
+                                   __func__,
+                                   device_names[i],
+                                   GET_XCODER_DEVICE_TYPE_STR(j), GET_XCODER_DEVICE_TYPE_STR(k));
+                            ni_device_close(device_handle);
+                            return false;
+                        }
                     }
                 }
                 continue;
             }
             device_queue.xcoder_cnt[j] += device_capability.xcoder_cnt[j];
         }
-NEXT:
         ni_device_close(device_handle);
     }
 
@@ -906,7 +969,6 @@ NEXT:
                existing_device_queue->xcoder_cnt[i]);
         return false;
     }
-
     return true;
 }
 
